@@ -1,1 +1,7 @@
-Just wait a bit more...
+= Ruport + Capistrano = Rupostrano
+
+At the moment this is just a stewpot for a bunch of files I use to deploy
+Ruport-based standalone application.
+
+Everything is based on Capistrano 2.2.0 (more or less) and needs to be
+updated.
