@@ -37,7 +37,7 @@ _cset(:revision)  { source.head }
 # =========================================================================
 
 _cset(:source)            { Capistrano::Deploy::SCM.new(scm, self) }
-_cset(:real_revision)     { source.local.query_revision(revision) { |cmd| with_env('LC_ALL', 'C') { `#{cmd}` } } }
+_cset(:real_revision)     { source.local.query_revision(revision) { |cmd| with_env("LC_ALL", "C") { run_locally(cmd) } } }
 
 _cset(:strategy)          { Capistrano::Deploy::Strategy.new(deploy_via, self) }
 
@@ -45,6 +45,7 @@ _cset(:release_name)      { set :deploy_timestamped, true; Time.now.strftime('%Y
 
 _cset :version_dir,       'releases'
 _cset :shared_dir,        'shared'
+_cset :shared_children,   %w(system log pids)
 _cset :current_dir,       'current'
 
 _cset(:releases_path)     { File.join(deploy_to, version_dir) }
@@ -52,9 +53,9 @@ _cset(:shared_path)       { File.join(deploy_to, shared_dir) }
 _cset(:current_path)      { File.join(deploy_to, current_dir) }
 _cset(:release_path)      { File.join(releases_path, release_name) }
 
-_cset(:releases)          { capture("ls -x #{releases_path}").split.sort }
+_cset(:releases)          { capture("ls -xt #{releases_path}").split.reverse }
 _cset(:current_release)   { File.join(releases_path, releases.last) }
-_cset(:previous_release)  { File.join(releases_path, releases[-2]) }
+_cset(:previous_release)  { releases.length > 1 ? File.join(releases_path, releases[-2]) : nil }
 
 _cset(:current_revision)  { capture("cat #{current_path}/REVISION").chomp }
 _cset(:latest_revision)   { capture("cat #{current_release}/REVISION").chomp }
@@ -92,6 +93,52 @@ ensure
   ENV[name] = saved
 end
 
+# logs the command then executes it locally. returns the command output as a
+# string
+def run_locally(cmd)
+  logger.trace "executing locally: #{cmd.inspect}" if logger
+  `#{cmd}`
+end
+
+# If a command is given, this will try to execute the given command, as
+# described below. Otherwise, it will return a string for use in embedding in
+# another command, for executing that command as described below.
+#
+# If :run_method is :sudo (or :use_sudo is true), this executes the given
+# command via +sudo+. Otherwise is uses +run+. If :as is given as a key, it
+# will be passed as the user to sudo as, if using sudo. If the :as key is not
+# given, it will default to whatever the value of the :admin_runner variable
+# is, which (by default) is unset.
+#
+# THUS, if you want to try to run something via sudo, and what to use the root
+# user, you'd just to try_sudo('something'). If you wanted to try_sudo as
+# someone else, you'd just do try_sudo('something', :as => "bob"). If you
+# always wanted sudo to run as a particular user, you could do
+# set(:admin_runner, "bob").
+def try_sudo(*args)
+  options = args.last.is_a?(Hash) ? args.pop : {}
+  command = args.shift
+  raise ArgumentError, "too many arguments" if args.any?
+
+  as = options.fetch(:as, fetch(:admin_runner, nil))
+  via = fetch(:run_method, :sudo)
+  if command
+    invoke_command(command, :via => via, :as => as)
+  elsif via == :sudo
+    sudo(:as => as)
+  else
+    ""
+  end
+end
+
+# Same as sudo, but tries sudo with :as set to the value of the :runner
+# variable (which defaults to "app").
+def try_runner(*args)
+  options = args.last.is_a?(Hash) ? args.pop : {}
+  args << options.merge(:as => fetch(:runner, "app"))
+  try_sudo(*args)
+end
+
 # =========================================================================
 # These are the tasks that are available to help with deploying web apps,
 # and specifically, Rails applications. You can have cap give you a summary
@@ -110,22 +157,20 @@ namespace :deploy do
   desc <<-DESC
     Prepares one or more servers for deployment. Before you can use any of \
     the Capistrano deployment tasks with your project, you will need to make \
-    sure all of your servers have been prepared with `cap setup'. When you \
-    add a new server to your cluster, you can easily run the setup task on \
-    just that server by specifying the HOSTS environment variable:
+    sure all of your servers have been prepared with `cap deploy:setup'. \
+    When you add a new server to your cluster, you can easily run the setup \
+    task on just that server by specifying the HOSTS environment variable:
 
-      $ cap HOSTS=new.server.com setup
+      $ cap HOSTS=new.server.com deploy:setup
 
     It is safe to run this task on servers that have already been set up; it \
     will not destroy any deployed revisions or data.
   DESC
   task :setup, :except => { :no_release => true } do
     dirs = [deploy_to, releases_path, shared_path]
-    dirs += %w(config).map { |d| File.join(shared_path, d) }
-    cmd = "umask 02 && mkdir -p #{dirs.join(' ')}"
-    invoke_command cmd, :via => run_method
-    cmd = "chown -R #{user}:#{group} #{deploy_to}"
-    invoke_command cmd, :via => run_method if fetch(:change_ownership, false)
+    dirs += shared_children.map { |d| File.join(shared_path, d) }
+    run "#{try_sudo} mkdir -p #{dirs.join(' ')}"
+    run "#{try_sudo} chown -R #{user}:#{group} #{deploy_to}" if fetch(:change_ownership, false)
   end
 
   desc <<-DESC
@@ -153,7 +198,7 @@ namespace :deploy do
     defaults to :copy).
   DESC
   task :update_code, :except => { :no_release => true } do
-    on_rollback { invoke_command "rm -rf #{release_path}; true", :via => run_method }
+    on_rollback { run "#{try_sudo} rm -rf #{release_path}; true" }
     strategy.deploy!
     share_resources
     finalize_update
@@ -161,32 +206,26 @@ namespace :deploy do
 
   desc <<-DESC
     [internal] Set up shared copies of key configuration files. This is \
-    called by update_code after the basic deploy ends. config/environment.rb \
-    is copied in the shared directory, if it's not already there.
+    called by update_code after the basic deploy ends. :shared_resources \
+    variable lists those files (paths relative to the application root).
   DESC
   task :share_resources, :except => { :no_release => true } do
-    shared_config = File.join(shared_path, 'config')
-    files = ['environment.rb']
-    shared_files = files.map {|f| File.join(shared_config, f)}
-    files.map! {|f| File.join(latest_release, "config/#{f}")}
+    resources = fetch(:shared_resources, [])
+    shared_files = resources.map {|f| File.join(shared_path, f)}
+    resources.map! {|f| File.join(latest_release, f)}
     shared_files.each_with_index do |f, i|
-      run "if [ ! -f #{f} ]; then cp #{files[i]} #{f}; fi"
+      run "if [ ! -f #{f} ]; then #{try_sudo} cp #{resources[i]} #{f}; fi"
+      run "#{try_sudo} rm -f #{resources[i]}; #{try_sudo} ln -s #{f} #{resources[i]}"
     end
   end
 
   desc <<-DESC
-    [internal] This task set up symlinks to the shared directory and then \
-    will make the release group-writable (if the :group_writable variabile \
-    is set to true).
+    [internal] This task will make the release group-writable (if the \
+    :group_writable variabile is set to true).
   DESC
   task :finalize_update, :except => { :no_release => true } do
-    cmd = "rm -f #{latest_release}/config/environment.rb && \
-      ln -s #{shared_path}/config/environment.rb #{latest_release}/config/environment.rb"
-    invoke_command cmd, :via => run_method
-    cmd = "chmod -R g+w #{latest_release}"
-    invoke_command cmd, :via => run_method if fetch(:group_writable, true)
-    cmd = "chown -R #{user}:#{group} #{latest_release}"
-    invoke_command cmd, :via => run_method if fetch(:change_ownership, true)
+    run "#{try_sudo} chmod -R g+w #{latest_release}" if fetch(:group_writable, true)
+    run "#{try_sudo} chown -R #{user}:#{group} #{latest_release}" if fetch(:change_ownership, true)
   end
 
   desc <<-DESC
@@ -199,9 +238,15 @@ namespace :deploy do
     except `setup').
   DESC
   task :symlink, :except => { :no_release => true } do
-    on_rollback { invoke_command "rm -f #{current_path}; ln -s #{previous_release} #{current_path}; true", :via => run_method }
-    cmd = "rm -f #{current_path} && ln -s #{latest_release} #{current_path}"
-    invoke_command cmd, :via => run_method
+    on_rollback do
+      if previous_release
+        run "#{try_sudo} rm -f #{current_path}; #{try_sudo} ln -s #{previous_release} #{current_path}; true"
+      else
+        logger.important "no previous release to rollback to, rollback of symlink skipped"
+      end
+    end
+
+    run "#{try_sudo} rm -f #{current_path} && #{try_sudo} ln -s #{latest_release} #{current_path}"
   end
 
   desc <<-DESC
@@ -215,36 +260,52 @@ namespace :deploy do
     To use this task, specify the files and directories you want to copy as \
     a comma-delimited list in the FILES environment variable. All \
     directories will be processed recursively, with all files being pushed \
-    to the deployment servers. Any file or directory starting with a '.' \
-    character will be ignored.
+    to the deployment servers.
 
       $ cap deploy:upload FILES=templates,controller.rb
+
+    Dir globs are also supported:
+
+      $ cap deploy:upload FILES='config/apache/*.conf'
   DESC
   task :upload, :except => { :no_release => true } do
-    files = (ENV['FILES'] || '').
-      split(',').
-      map { |f| f.strip!; File.directory?(f) ? Dir["#{f}/**/*"] : f }.
-      flatten.
-      reject { |f| File.directory?(f) || File.basename(f)[0] == ?. }
+    files = (ENV["FILES"] || "").split(",").map { |f| Dir[f.strip] }.flatten
+    abort "Please specify at least one file or directory to update (via the FILES environment variable)" if files.empty?
 
-    abort 'Please specify at least one file to update (via the FILES environment variable)' if files.empty?
-
-    files.each do |file|
-      content = File.open(file, 'rb') { |f| f.read }
-      put content, File.join(current_path, file)
-    end
+    files.each { |file| top.upload(file, File.join(current_path, file)) }
   end
 
-  desc <<-DESC
-    Rolls back to the previously deployed version. The `current' symlink \
-    will be updated to point at the previously deployed version, and then \
-    the current release will be removed from the servers.
-  DESC
-  task :rollback, :except => { :no_release => true } do
-    if releases.length < 2
-      abort 'could not rollback the code because there is no prior release'
-    else
-      invoke_command "rm #{current_path}; ln -s #{previous_release} #{current_path} && rm -rf #{current_release}", :via => run_method
+  namespace :rollback do
+    desc <<-DESC
+      [internal] Points the current symlink at the previous revision. This \
+      is called by the rollback sequence, and should rarely (if ever) need \
+      to be called directly.
+    DESC
+    task :revision, :except => { :no_release => true } do
+      if previous_release
+        run "#{try_sudo} rm #{current_path}; #{try_sudo} ln -s #{previous_release} #{current_path}"
+      else
+        abort "could not rollback the code because there is no prior release"
+      end
+    end
+
+    desc <<-DESC
+      [internal] Removes the most recently deployed release. This is called \
+      by the rollback sequence, and should rarely (if ever) need to be \
+      called directly.
+    DESC
+    task :cleanup, :except => { :no_release => true } do
+      run "if [ `readlink #{current_path}` != #{current_release} ]; then #{try_sudo} rm -rf #{current_release}; fi"
+    end
+
+    desc <<-DESC
+      Rolls back to the previously deployed version. The `current' symlink \
+      will be updated to point at the previously deployed version, and then \
+      the current release will be removed from the servers.
+    DESC
+    task :default, :except => { :no_release => true } do
+      revision
+      cleanup
     end
   end
 
@@ -265,7 +326,7 @@ namespace :deploy do
       directories = (releases - releases.last(count)).map { |release|
         File.join(releases_path, release) }.join(' ')
 
-      invoke_command "rm -rf #{directories}", :via => run_method
+      run "#{try_sudo} rm -rf #{directories}"
     end
   end
 

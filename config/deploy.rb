@@ -5,6 +5,8 @@ set :deploy_to, "/home/me/#{application}"
 set :use_sudo, false
 set :group_writable, false
 set :change_ownership, false
+set :shared_children, %w(config)
+set :shared_resources, %w(config/environment.rb)
 
 role :app, 'me@production.example.com'
 
