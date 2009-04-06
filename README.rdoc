@@ -1,6 +1,26 @@
 = Ruport + Capistrano = Rupostrano
 
-At the moment this is just a stewpot for a bunch of files I use to deploy
-Ruport-based standalone application.
+Capistrano's recipe tailored to deploy Ruport-base standalone application.
 
-Everything is based on Capistrano 2.5.5.
+Everything is based on Capistrano 2.5.5, copyright (c) 2005-2008 Jamis Buck
+<jamis@37signals.com>
+
+== Usage
+
+In your Ruport-base standalone application's root run:
+
+  $ rupostrano
+
+This will write Capfile, config/deploy.rb and config/environment.rb
+(overwriting them if they alread exist, but you have VCS in place, don't you?)
+
+Edit config/deploy.rb to your taste and needs and run
+
+  $ cap -T
+
+to see the available tasks. Then
+
+  $ cap deploy:setup
+  $ cap deploy
+
+and enjoy the life.

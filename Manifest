@@ -1,0 +1,10 @@
+bin/rupostrano
+lib/rupostrano.rb
+LICENSE.rdoc
+Manifest
+Rakefile
+README.rdoc
+rupostrano.gemspec
+templates/Capfile
+templates/deploy.rb
+templates/environment.rb
