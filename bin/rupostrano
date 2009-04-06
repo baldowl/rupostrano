@@ -1,0 +1,13 @@
+#!/usr/bin/env ruby
+
+require 'fileutils'
+
+FileUtils.cp File.join(File.dirname(__FILE__), '..', 'templates', 'Capfile'),
+  File.join(Dir.pwd, 'Capfile')
+
+FileUtils.mkdir_p File.join(Dir.pwd, 'config')
+
+FileUtils.cp File.join(File.dirname(__FILE__), '..', 'templates', 'environment.rb'),
+  File.join(Dir.pwd, 'config', 'environment.rb')
+FileUtils.cp File.join(File.dirname(__FILE__), '..', 'templates', 'deploy.rb'),
+  File.join(Dir.pwd, 'config', 'deploy.rb')

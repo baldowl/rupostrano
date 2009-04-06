@@ -1,0 +1,5 @@
+require 'capistrano/version'
+require 'rubygems'
+require 'rupostrano'
+
+load 'config/deploy' if respond_to?(:namespace)
